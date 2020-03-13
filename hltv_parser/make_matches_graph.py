@@ -2,6 +2,7 @@ import requests
 import bs4 as bs
 import csv
 import asyncio
+import itertools
 from proxybroker import Broker
 from datetime import datetime
 
@@ -14,6 +15,7 @@ class MakeMatchesGraph:
             'user-agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_14_5) AppleWebKit/537.36 (KHTML, like Gecko) \
                             Chrome/79.0.3945.130 Safari/537.36'}
         self.lineups = set()
+        self.lineups_info = {}
         self.matches = {}
         self.new_lineups = None
         self.new_matches = None
@@ -54,6 +56,9 @@ class MakeMatchesGraph:
             f.write('lineups\n')
             for lineup in self.lineups:
                 f.write(self.encode_lineup(lineup) + '\n')
+            f.write('lineups_info\n')
+            for lineup in self.lineups_info:
+                f.write('self.lineups_info[{}] = {}\n'.format(lineup, self.lineups_info[lineup]))
             f.write('matches\n')
             for match_id in self.matches:
                 f.write('self.matches[{}] = {}\n'.format(match_id, self.matches[match_id]))
@@ -83,12 +88,14 @@ class MakeMatchesGraph:
             lines = f.readlines()
             for line in lines:
                 line = line.strip()
-                if line in ('lineups', 'matches', 'new_lineups', 'new_matches', 'old_matches', 'start date',
+                if line in ('lineups', 'lineups_info', 'matches', 'new_lineups', 'new_matches', 'old_matches', 'start date',
                             'end date', 'min lineup match'):
                     what_reading = line
                     continue
                 if what_reading == 'lineups':
                     self.lineups.add(line)
+                elif what_reading == 'lineups_info':
+                    exec(line)
                 elif what_reading == 'matches':
                     exec(line)
                 elif what_reading == 'new_lineups':
@@ -139,21 +146,34 @@ class MakeMatchesGraph:
             lineups.add(self.encode_lineup(lineup))
         return lineups
 
+    def get_next_proxy(self):
+        try:
+            self.curr_proxy = next(self.proxies_iter)
+        except StopIteration:
+            self.proxies_iter = self.make_proxies_iter()
+            self.curr_proxy = next(self.proxies_iter)
+        print('changed proxy to {}'.format(self.curr_proxy))
+
+    def get_page(self, url, params):
+        try:
+            r = self.session.get(url, params=params, proxies={'https': 'https://' + self.curr_proxy})
+        except requests.exceptions.ConnectionError:
+            self.get_next_proxy()
+            r = self.get_page(url, params)
+        if r.status_code != 200:
+            if r.status_code == 429 or r.status_code == 403 or r.status_code == 500:
+                self.get_next_proxy()
+                r = self.get_page(url, params)
+            else:
+                raise Exception("status code is {}".format(r.status_code))
+        return r
+
     def parse_match_by_id(self, match_id):
+        print(match_id)
         if match_id in self.matches.keys():
             return self.matches[match_id]
         url = 'https://www.hltv.org/stats/matches/mapstatsid/' + str(match_id) + '/placeholder'
-        r = self.session.get(url, proxies={'https': 'https://' + self.curr_proxy})
-        if r.status_code != 200:
-            if r.status_code == 429 or r.status_code == 403:
-                try:
-                    self.curr_proxy = next(self.proxies_iter)
-                except StopIteration:
-                    self.proxies_iter = self.make_proxies_iter()
-                    self.curr_proxy = next(self.proxies_iter)
-                r = self.session.get(url, proxies={'https': 'https://' + self.curr_proxy})
-            else:
-                raise Exception("can't parse match {} status code is {}".format(match_id, r.status_code))
+        r = self.get_page(url, None)
         soup = bs.BeautifulSoup(r.text, 'lxml')
         t1 = soup.find('div', attrs={'class': 'team-left'})
         t1_score = int(t1.find('div', attrs={'class': ['bold won', 'bold lost', 'bold']}).text)
@@ -169,10 +189,13 @@ class MakeMatchesGraph:
         t2_players = self.encode_lineup(t2_players)
         date = soup.find('div', attrs={'class': 'wide-grid'})\
             .find('span', attrs={'data-time-format': 'yyyy-MM-dd HH:mm'}).text
+        match_info_box = soup.find('div', attrs={'class': 'match-info-box'})
+        cs_map = match_info_box.text.split('\n')[2]
+        tourney = match_info_box.find('a')['href'].split('=')[1]
         return {'t1_lineup': t1_players, 't2_lineup': t2_players,
-                't1_score': t1_score, 't2_score': t2_score, 'date': date}
+                't1_score': t1_score, 't2_score': t2_score, 'date': date, 'map': cs_map, 'tourney': tourney}
 
-    def parse_lineups(self, match_ids):
+    def find_lineups(self, match_ids):
         lineups = set()
         for match_id in match_ids:
             match = self.parse_match_by_id(match_id)
@@ -188,6 +211,7 @@ class MakeMatchesGraph:
         return match_ids
 
     def parse_lineup_matches(self, lineup):
+        print(lineup)
         url = 'https://www.hltv.org/stats/lineup/matches'
         lineup = self.decode_lineup(lineup)
         params = {
@@ -198,17 +222,7 @@ class MakeMatchesGraph:
             params['startDate'] = self.start_date
         if self.end_date is not None:
             params['endDate'] = self.end_date
-        r = self.session.get(url, params=params, proxies={'https': 'https://' + self.curr_proxy})
-        if r.status_code != 200:
-            if r.status_code == 429 or r.status_code == 403:
-                try:
-                    self.curr_proxy = next(self.proxies_iter)
-                except StopIteration:
-                    self.proxies_iter = self.make_proxies_iter()
-                    self.curr_proxy = next(self.proxies_iter)
-                r = self.session.get(url, params=params, proxies={'https': 'https://' + self.curr_proxy})
-            else:
-                raise Exception("can't parse lineup {} matches status code is {}".format(lineup, r.status_code))
+        r = self.get_page(url, params)
         soup = bs.BeautifulSoup(r.text, 'lxml')
         match_blocks = soup.find_all('tr', attrs={'class': ['group-1 first', 'group-1 ', 'group-2 first', 'group-2 ']})
         match_ids = set()
@@ -217,6 +231,47 @@ class MakeMatchesGraph:
             match_ids.add(match_id)
         return match_ids
 
+    def parse_lineups_info(self, lineups):
+        for lineup in lineups:
+            print('parsing lineup info for ', lineup)
+            self.lineups_info[lineup] = {}
+            self.lineups_info[lineup]['Dust2'] = self.parse_map_info(lineup, 31)
+            self.lineups_info[lineup]['Inferno'] = self.parse_map_info(lineup, 33)
+            self.lineups_info[lineup]['Mirage'] = self.parse_map_info(lineup, 32)
+            self.lineups_info[lineup]['Nuke'] = self.parse_map_info(lineup, 34)
+            self.lineups_info[lineup]['Overpass'] = self.parse_map_info(lineup, 40)
+            self.lineups_info[lineup]['Train'] = self.parse_map_info(lineup, 35)
+            self.lineups_info[lineup]['Vertigo'] = self.parse_map_info(lineup, 46)
+
+    def parse_map_info(self, lineup, map_code):
+        info = {}
+        url = 'https://www.hltv.org/stats/lineup/map/' + str(map_code)
+        lineup = self.decode_lineup(lineup)
+        params = {
+            'lineup': lineup,
+            'minLineupMatch': self.min_lineup_match,
+        }
+        if self.start_date is not None:
+            params['startDate'] = self.start_date
+        if self.end_date is not None:
+            params['endDate'] = self.end_date
+        r = self.get_page(url, params)
+        soup = bs.BeautifulSoup(r.text, 'lxml')
+        tp = soup.find('div', attrs={'class': 'stats-row'})
+        info['times_played'] = tp.find_all('span')[1].text
+        wdl = tp.find_next('div', attrs={'class': 'stats-row'})
+        info['wins'], info['draws'], info['losses'] = wdl.find_all('span')[1].text.split('/')
+        tot_rounds = wdl.find_next('div', attrs={'class': 'stats-row'})
+        info['total_rounds_played'] = tot_rounds.find_all('span')[1].text
+        rounds_won = tot_rounds.find_next('div', attrs={'class': 'stats-row'})
+        info['rounds_won'] = rounds_won.find_all('span')[1].text
+        wp = rounds_won.find_next('div', attrs={'class': 'stats-row'})
+        info['win_percent'] = wp.find_all('span')[1].text
+        pr_wp = wp.find_next('div', attrs={'class': 'stats-row'}).find_next('div', attrs={'class': 'stats-row'}). \
+            find_next('div', attrs={'class': 'stats-row'})
+        info['pistol_round_win_percent'] = pr_wp.find_all('span')[1].text[:-1]
+        return info
+
     def make_graph(self):
         if self.from_state is not None:
             print('loading state from {}'.format(self.from_state))
@@ -224,17 +279,19 @@ class MakeMatchesGraph:
         else:
             print('parsing top 30')
             self.new_lineups = self.parse_top_30()
-            print(self.new_lineups)
+            print('new lineups', self.new_lineups)
             self.old_matches = set()
         while True:
             print('parsing matches')
             self.new_matches = self.parse_matches(self.new_lineups) - self.old_matches
-            print(self.new_matches)
+            print('new matches', self.new_matches)
+            # print('parsing lineups info')
+            # self.parse_lineups_info(self.new_lineups)
             self.lineups |= self.new_lineups
             print('parsing lineups')
-            self.new_lineups = self.parse_lineups(self.new_matches) - self.lineups
+            self.new_lineups = self.find_lineups(self.new_matches) - self.lineups
             self.old_matches |= self.new_matches
-            print(self.new_lineups)
+            print('new lineups', self.new_lineups)
             if len(self.new_matches) == 0:
                 print('*****')
                 break
@@ -242,29 +299,39 @@ class MakeMatchesGraph:
     def matches_to_csv(self, file_name='matches.csv'):
         with open(file_name, 'w') as f:
             writer = csv.writer(f)
-            writer.writerow(('id', 't1_lineup', 't2_lineup', 't1_score', 't2_score', 'date'))
+            writer.writerow(('id', 't1_lineup', 't2_lineup', 't1_score', 't2_score', 'date', 'map', 'tourney'))
             for match_id in self.matches:
                 writer.writerow((match_id, self.matches[match_id]['t1_lineup'],
                                  self.matches[match_id]['t2_lineup'], self.matches[match_id]['t1_score'],
-                                 self.matches[match_id]['t2_score'], self.matches[match_id]['date']))
+                                 self.matches[match_id]['t2_score'], self.matches[match_id]['date'],
+                                 self.matches[match_id]['map'], self.matches[match_id]['tourney']))
 
     def lineups_to_csv(self, file_name='lineups.csv'):
         with open(file_name, 'w') as f:
             writer = csv.writer(f)
-            writer.writerow(('lineup',))
-            for lineup in self.lineups:
-                writer.writerow((lineup,))
+            header = ('lineup',)
+            cs_maps = ('Dust2', 'Inferno', 'Mirage', 'Nuke', 'Overpass', 'Train', 'Vertigo')
+            stats = ('times_played', 'wins', 'total_rounds_played', 'rounds_won', 'win_percent',
+                     'pistol_round_win_percent')
+            for cs_map, stat in itertools.product(cs_maps, stats):
+                header += (cs_map + '_' + stat,)
+            writer.writerow(header)
+            for lineup in self.lineups_info:
+                row = (lineup,)
+                for cs_map, stat in itertools.product(cs_maps, stats):
+                    row += (self.lineups_info[lineup][cs_map][stat],)
+                writer.writerow(row)
 
 
 def main():
-    parser = MakeMatchesGraph(start_date='2019-02-21', min_lineup_match=4, from_state='fff.txt')
+    parser = MakeMatchesGraph(start_date='2013-01-01', min_lineup_match=5, from_state='f.txt')
     try:
         parser.make_graph()
     except Exception as e:
         print('exception in main: {}'.format(e))
         parser.save_state()
     parser.matches_to_csv()
-    parser.lineups_to_csv()
+    # parser.lineups_to_csv()
     parser.save_state()
 
 
