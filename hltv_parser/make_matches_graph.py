@@ -5,6 +5,7 @@ import asyncio
 import itertools
 from proxybroker import Broker
 from datetime import datetime
+import time
 
 
 class MakeMatchesGraph:
@@ -29,6 +30,7 @@ class MakeMatchesGraph:
         self.proxies_iter = self.make_proxies_iter()
         self.curr_proxy = next(self.proxies_iter)
         self.from_state = from_state
+        self.counter = 0
 
     def make_proxies_iter(self):
         proxies = asyncio.Queue()
@@ -49,7 +51,7 @@ class MakeMatchesGraph:
                 break
             proxies_list.append('%s:%d' % (proxy.host, proxy.port))
             print('%s:%d' % (proxy.host, proxy.port))
-        return proxies_list
+        return [None,] + proxies_list
 
     def save_state(self):
         with open('f.txt', 'w') as f:
@@ -155,13 +157,35 @@ class MakeMatchesGraph:
         print('changed proxy to {}'.format(self.curr_proxy))
 
     def get_page(self, url, params):
+        self.counter += 1
+        if self.counter == 100:
+            self.counter = 0
+            self.save_state()
+            print('zzzz')
+            time.sleep(200)
+        if self.curr_proxy is None:
+            r = self.session.get(url, params=params)
+            if r.status_code != 200:
+                if r.status_code == 429 or r.status_code == 403:
+                    print("status code is {}".format(r.status_code))
+                    self.get_next_proxy()
+                    r = self.get_page(url, params)
+                elif r.status_code == 500:
+                    print('500 zzzz')
+                    time.sleep(200)
+                else:
+                    raise Exception("status code is {}".format(r.status_code))
+            return r
+
         try:
             r = self.session.get(url, params=params, proxies={'https': 'https://' + self.curr_proxy})
         except requests.exceptions.ConnectionError:
+            print('connection error')
             self.get_next_proxy()
             r = self.get_page(url, params)
         if r.status_code != 200:
             if r.status_code == 429 or r.status_code == 403 or r.status_code == 500:
+                print("status code is {}".format(r.status_code))
                 self.get_next_proxy()
                 r = self.get_page(url, params)
             else:
