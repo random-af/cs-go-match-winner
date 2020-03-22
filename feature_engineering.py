@@ -108,14 +108,10 @@ def compute_elo_rankings(data):
     the elo ranking of the 2 players at the beginning of the match
 
     """
-    winner = np.where(data['t1_score'] >= data['t2_score'], data['t1_lineup'], data['t2_lineup'])
-    loser = np.where(data['t1_score'] >= data['t2_score'], data['t2_lineup'], data['t1_lineup'])
-    data['Winner'] = winner
-    data['Loser'] = loser
     players = list(pd.Series(list(data.Winner) + list(data.Loser)).value_counts().index)
     elo = pd.Series(np.ones(len(players)) * 1500, index=players)
     ranking_elo = [(1500, 1500)]
-    for i in range(1, len(data) + 1):
+    for i in range(1, len(data)):
         w = data.iloc[i - 1, :].Winner
         l = data.iloc[i - 1, :].Loser
         elow = elo[w]
@@ -128,16 +124,20 @@ def compute_elo_rankings(data):
         elo[w] = new_elow
         elo[l] = new_elol
         ranking_elo.append((elo[data.iloc[i, :]['t1_lineup']], elo[data.iloc[i, :]['t2_lineup']]))
-    ranking_elo = pd.DataFrame(ranking_elo, columns=['t1_elo', 't2_elo'])
+    ranking_elo = pd.DataFrame(ranking_elo, columns=["t1_elo", "t2_elo"])
     return ranking_elo, elo
 
 
 def process_data(data, time_span=90):
-    data = data.sort_values(by=['date'])
+    tr = data.sort_values(by=['date'])
+    winner = np.where(tr['t1_score'] >= tr['t2_score'], tr['t1_lineup'], tr['t2_lineup'])
+    loser = np.where(tr['t1_score'] >= tr['t2_score'], tr['t2_lineup'], tr['t1_lineup'])
+    tr['Winner'] = winner
+    tr['Loser'] = loser
+    ranking_elo, lineups_elo = compute_elo_rankings(tr)
     tr, lineups_map_info = fit_transform_data(data, time_span)
     y = tr.apply(lambda d: 1 if d['t1_score'] > d['t2_score'] else 0, axis=1)
-    y.reset_index()
-    ranking_elo, lineups_elo = compute_elo_rankings(data)
+    y = y.reset_index().drop(columns=['index'])
     cs_maps = ('Dust2', 'Inferno', 'Mirage', 'Nuke', 'Overpass', 'Train', 'Vertigo')
     stats = ('times_played', 'wins')
     to_drop = ['t1_' + cs_map + '_' + stat for cs_map, stat in itertools.product(cs_maps, stats)] + \
@@ -147,4 +147,6 @@ def process_data(data, time_span=90):
     x = tr.drop(columns=to_drop)
     x = x.reset_index().drop(columns=['index'])
     x['elo_diff'] = ranking_elo['t1_elo'] - ranking_elo['t2_elo']
+    x['t1_elo'] = ranking_elo['t1_elo']
+    x['t2_elo'] = ranking_elo['t2_elo']
     return x, y, lineups_map_info, lineups_elo

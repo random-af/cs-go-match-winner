@@ -34,15 +34,15 @@ class BayesianPredictor:
         self.lineup_id2f = {v: k for k, v in self.lineup_f2id.items()}
         t1 = matches['t1_lineup'].map(self.lineup_id2f)
         t2 = matches['t2_lineup'].map(self.lineup_id2f)
-        threshold_date = target['date'].apply(
-            lambda x: str(datetime.datetime.strptime(x, '%Y-%m-%d %H:%M') - datetime.timedelta(days=self.time_span)))
+        threshold_date = str(datetime.datetime.strptime(matches['date'].max(), '%Y-%m-%d %H:%M') -\
+                             datetime.timedelta(days=self.time_span))
         t1_older = matches[matches['date'] <= threshold_date]['t1_lineup'].map(self.lineup_id2f)
         t2_older = matches[matches['date'] <= threshold_date]['t2_lineup'].map(self.lineup_id2f)
         t1_newer = matches[matches['date'] > threshold_date]['t1_lineup'].map(self.lineup_id2f)
         t2_newer = matches[matches['date'] > threshold_date]['t2_lineup'].map(self.lineup_id2f)
         t_num = len(lineups)  # number of teams
-        obs_older = target[target['date'] <= threshold_date]['y']
-        obs_newer = target[target['date'] > threshold_date]['y']
+        obs_older = target[matches['date'] <= threshold_date]
+        obs_newer = target[matches['date'] > threshold_date]
         # modeling older observations
         with pm.Model() as model:
             sigma = pm.HalfFlat('sigma', shape=t_num)
