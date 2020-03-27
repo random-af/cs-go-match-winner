@@ -7,9 +7,10 @@ import datetime
 
 class BayesianPredictor:
 
-    def __init__(self, time_span=90, fit_iters=10000, pred_iters=2000, c=2):
+    def __init__(self, time_span=90, tune=5000, fit_iters=10000, pred_iters=2000, c=2):
         self.time_span = time_span
         self.fit_iters = fit_iters
+        self.tune = tune
         self.pred_iters = pred_iters
         self.trace = None
         self.c = c
@@ -20,7 +21,7 @@ class BayesianPredictor:
         smin, smax = np.min(samples), np.max(samples)
         width = smax - smin
         x = np.linspace(smin, smax, 100)
-        y = stats.gaussian_kde(samples)(x)
+        y = stats.gaussian_kde(samples.T)(x)
 
         # what was never sampled should have a small probability but not 0,
         # so we'll extend the domain and use linear approximation of density on it
@@ -34,31 +35,31 @@ class BayesianPredictor:
         self.lineup_id2f = {v: k for k, v in self.lineup_f2id.items()}
         t1 = matches['t1_lineup'].map(self.lineup_id2f)
         t2 = matches['t2_lineup'].map(self.lineup_id2f)
-        threshold_date = str(datetime.datetime.strptime(matches['date'].max(), '%Y-%m-%d %H:%M') -\
-                             datetime.timedelta(days=self.time_span))
-        t1_older = matches[matches['date'] <= threshold_date]['t1_lineup'].map(self.lineup_id2f)
-        t2_older = matches[matches['date'] <= threshold_date]['t2_lineup'].map(self.lineup_id2f)
-        t1_newer = matches[matches['date'] > threshold_date]['t1_lineup'].map(self.lineup_id2f)
-        t2_newer = matches[matches['date'] > threshold_date]['t2_lineup'].map(self.lineup_id2f)
+        # threshold_date = str(datetime.datetime.strptime(matches['date'].max(), '%Y-%m-%d %H:%M') -\
+        #                     datetime.timedelta(days=self.time_span))
+        # t1_older = matches[matches['date'] <= threshold_date]['t1_lineup'].map(self.lineup_id2f)
+        # t2_older = matches[matches['date'] <= threshold_date]['t2_lineup'].map(self.lineup_id2f)
+        # t1_newer = matches[matches['date'] > threshold_date]['t1_lineup'].map(self.lineup_id2f)
+        # t2_newer = matches[matches['date'] > threshold_date]['t2_lineup'].map(self.lineup_id2f)
         t_num = len(lineups)  # number of teams
-        obs_older = target[matches['date'] <= threshold_date]
-        obs_newer = target[matches['date'] > threshold_date]
+        # obs_older = target[matches['date'] <= threshold_date]
+        # obs_newer = target[matches['date'] > threshold_date]
         # modeling older observations
         with pm.Model() as model:
             sigma = pm.HalfFlat('sigma', shape=t_num)
             alpha = pm.Normal('alpha', mu=0, sigma=sigma, shape=t_num)
-            theta = pm.Deterministic('theta', alpha[t1_older] - alpha[t2_older])
-            y = pm.Bernoulli('y', logit_p=theta, observed=obs_older)
-            self.trace = pm.sample(self.fit_iters)
+            theta = pm.Deterministic('theta', alpha[t1] - alpha[t2])
+            y = pm.Bernoulli('y', logit_p=theta, observed=target)
+            self.trace = pm.sample(self.fit_iters, tune=self.tune)
 
-        # modeling newer observations
+        '''# modeling newer observations
         with pm.Model() as model:
             alpha = self.from_posterior('alpha', self.trace['alpha'] * self.c)
             theta = pm.Deterministic('theta', alpha[t1_newer] - alpha[t2_newer])
             y = pm.Bernoulli('y', logit_p=theta, observed=obs_newer)
-            self.trace = pm.sample(self.fit_iters)
+            self.trace = pm.sample(self.fit_iters)'''
 
-    def predict(self, matches):
+    def predict1(self, matches):
         t1 = matches['t1_lineup'].map(self.lineup_id2f)
         t2 = matches['t2_lineup'].map(self.lineup_id2f)
         with pm.Model() as model:
@@ -68,9 +69,9 @@ class BayesianPredictor:
             trace = pm.sample(self.pred_iters)
         return trace['p'].mean(axis=0)
 
-    def predict1(self, matches):
+    def predict(self, matches):
         alpha = self.trace['alpha'].mean(axis=0)
-        t1 = matches['t1_lineup'].map(self.lineup_id2f)
-        t2 = matches['t2_lineup'].map(self.lineup_id2f)
+        t1 = matches['t1_lineup'].map(self.lineup_id2f).to_numpy(dtype='int64')
+        t2 = matches['t2_lineup'].map(self.lineup_id2f).to_numpy(dtype='int64')
         exp_theta = np.exp(alpha[t1] - alpha[t2])
         return exp_theta/(exp_theta + 1)
